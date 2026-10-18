@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <!-- viewport-fit=cover：画面延伸到刘海区（安全区避让属布局，第二阶段再做）。
+         user-scalable=no 对 iOS 10+ 无效，真正禁缩放靠 canvas 的 touch-action -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#141c26">
+    <!-- 加到主屏后独立全屏启动：iOS 没有 screen.orientation.lock，横屏靠舞台旋转兜底 -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌙</text></svg>">
+    <title>访星探秘 · 学习版</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #141c26;
+            overflow: hidden;
+            /* 禁掉下拉刷新与滚动链：触屏拖拽不能被浏览器手势抢走 */
+            overscroll-behavior: none;
+        }
+
+        /*
+         * 舞台：canvas 与加载覆盖层的共同容器。
+         * 横屏 = 铺满视口；竖屏（仅触屏设备）由 canvas/main.js 的 applyOrientation
+         * 按横屏尺寸设置宽高并加 .rotated，整层 rotate(90deg) —— 布局代码始终
+         * 按横屏尺寸工作，不为竖屏重排。覆盖层必须与 canvas 同容器，
+         * 否则加载画面是正的、游戏是歪的。
+         *
+         * 竖屏时的尺寸与居中全部由 JS 写像素值（见 applyOrientation），这里只给横屏默认值。
+         * 不用 CSS 百分比居中（top:50% + translate(-50%)）：iOS 系浏览器的 position:fixed
+         * 百分比相对**布局视口**解析，它比可视视口高出工具条那一截，舞台会被整体推低、
+         * 旋转后底部正好被切掉一块。以 0,0 为基准的像素偏移不受该差异影响。
+         */
+        #stage {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* 旋转绕舞台自身中心（transform-origin 默认 50% 50%）：中心由 JS 摆正，转后不偏 */
+        #stage.rotated {
+            transform: rotate(90deg);
+        }
+
+        #game-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            /* 触屏手势全部归游戏：禁双击缩放 / 滚动 / 长按选中与弹出菜单 */
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        /* 加载进度覆盖层：素材约 27MB，由 canvas/main.js 的 onAssetProgress 更新。
+           位于 #stage 内、随舞台旋转（故用 absolute 而非 fixed） */
+        #loading {
+            position: absolute;
+            inset: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #141c26;
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            color: #dfe6ee;
+            transition: opacity .35s ease;
+        }
+
+        #loading.loading-done {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #loading .loading-box {
+            width: 340px;
+            text-align: center;
+        }
+
+        #loading .loading-title {
+            font-size: 26px;
+            letter-spacing: .35em;
+            text-indent: .35em;
+            color: #f0d9a0;
+        }
+
+        #loading .loading-sub {
+            margin: 8px 0 24px;
+            font-size: 13px;
+            color: #8fa3b8;
+        }
+
+        #loading .loading-track {
+            height: 4px;
+            background: #2a3644;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        #loading .loading-fill {
+            width: 0;
+            height: 100%;
+            background: #f0d9a0;
+            transition: width .15s ease;
+        }
+
+        #loading .loading-meta {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #8fa3b8;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        /* 加载失败清单：默认隐藏，有失败时由 main.js 展开 */
+        #loading .loading-fails {
+            margin-top: 14px;
+            text-align: left;
+        }
+
+        #loading .loading-fails-title {
+            font-size: 12px;
+            color: #ffb4a2;
+        }
+
+        #loading .loading-fails-list {
+            margin: 6px 0 10px;
+            padding: 8px 10px;
+            max-height: 108px;
+            overflow: auto;
+            list-style: none;
+            background: rgba(255, 120, 90, .08);
+            border: 1px solid rgba(255, 120, 90, .25);
+            border-radius: 6px;
+            font-family: Consolas, monospace;
+            font-size: 11px;
+            line-height: 1.8;
+            color: #ffb4a2;
+            word-break: break-all;
+        }
+
+        #loading .loading-fails-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        #loading .loading-fails-actions button {
+            flex: 1;
+            padding: 7px 0;
+            font-size: 13px;
+            border: 0;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        #loading #loading-retry {
+            color: #1b2530;
+            background: #f0d9a0;
+        }
+
+        #loading #loading-retry:hover {
+            background: #f7e5b8;
+        }
+
+        #loading #loading-enter {
+            color: #dfe6ee;
+            background: #33465a;
+        }
+
+        #loading #loading-enter:hover {
+            background: #3f5470;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- 舞台：横屏铺满视口；竖屏（触屏设备）整层旋转 90°，布局仍按横屏尺寸计算 -->
+    <div id="stage">
+    <!-- 加载进度：CanvasAssets.load(onProgress, onError) 每加载完一张素材回调一次 -->
+    <div id="loading">
+        <div class="loading-box">
+            <div class="loading-title">访星探秘</div>
+            <div class="loading-sub">CREATURES · 正在加载素材</div>
+            <div class="loading-track"><div class="loading-fill"></div></div>
+            <div class="loading-meta">
+                <span class="loading-pct">0%</span>
+                <span class="loading-file"></span>
+            </div>
+            <!-- 失败清单：有素材加载失败时展开，列出文件名与重试/进入按钮 -->
+            <div class="loading-fails" id="loading-fails" hidden>
+                <div class="loading-fails-title" id="loading-fails-title"></div>
+                <ul class="loading-fails-list" id="loading-fails-list"></ul>
+                <div class="loading-fails-actions">
+                    <button id="loading-retry" type="button">重新加载</button>
+                    <button id="loading-enter" type="button">仍要进入</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <canvas id="game-canvas"></canvas>
+
+    <!-- 内核与数据：按依赖顺序加载，全部挂在 window 上共享符号 -->
+    <script src="card_data/loader.js"></script>
+<script src="game.min.js"></script>
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+
+    <!-- UI 层：Canvas 实现，可整体替换，内核无需改动 -->
+    
+    
+    
+    
+    
+    
+    
+    </div>
+</body>
+
+</html>
